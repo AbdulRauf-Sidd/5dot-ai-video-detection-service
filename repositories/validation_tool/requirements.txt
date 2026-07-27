@@ -1,0 +1,40 @@
+# DeMamba DDP Training Requirements
+# Python 3.8+ recommended
+
+
+
+# Transformers for XCLIP
+transformers
+
+# Image/Video processing
+opencv-python
+imageio
+imageio-ffmpeg
+
+# Augmentation
+albumentations
+
+# Data processing
+numpy
+pandas
+scikit-learn
+
+# Configuration
+PyYAML
+
+# Logging & Monitoring
+wandb
+tqdm
+
+# Distributed training utilities
+timm
+
+# Optional: for faster video decoding
+# decord
+
+
+tensorboard
+ftfy
+regex
+
+av

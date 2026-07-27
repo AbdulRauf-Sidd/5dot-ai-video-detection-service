@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.git
+sessions/
+checkpoints/
+microsoft/
+repositories/validation_tool/checkpoints/
+*.pt
+*.pth
+*.safetensors
+test.py
