@@ -12,3 +12,5 @@ repositories/validation_tool/checkpoints/
 *.pth
 *.safetensors
 test.py
+MIGRATION_HANDOFF.md
+**/__pycache__
