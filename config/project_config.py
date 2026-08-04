@@ -34,7 +34,7 @@ DB_PASSWORD = os.environ["DB_PASSWORD"]
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 
 # --- Webhook ---
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://core-service.placeholder/webhook")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_MAX_RETRIES = 3
 
 # --- AWS S3 (source download / thumbnail upload) ---
