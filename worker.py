@@ -25,7 +25,7 @@ from config.project_config import (
     SQS_QUEUE_URL,
     THRESHOLD,
 )
-from helpers.video_helper import infer_chunk, split_video_into_chunks
+from helpers.video_helper import chunk_bounds, infer_chunk, split_video_into_chunks
 from ml_models.video import load_models
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -103,8 +103,7 @@ def process_job(conn, job_id: str) -> None:
         chunk_results = _run_inference_with_retry(job_id, source_path)
 
         for i, r in enumerate(chunk_results):
-            start = i * CHUNK_LENGTH_SECONDS
-            end = start + CHUNK_LENGTH_SECONDS
+            start, end = chunk_bounds(r["chunk"])
             probability = r["result"].get("probability", 0.0)
             db.update_chunk(conn, job_id, i, probability, start, end)
 

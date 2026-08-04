@@ -22,16 +22,35 @@ def create_chunk(input_path, start, end, chunk_path):
     return chunk_path
 
 
-def split_video_into_chunks(input_path, output_dir, chunk_length=5):
-    os.makedirs(output_dir, exist_ok=True)
-    
-    print(f"[INFO] Getting video duration for: {input_path}")
+def _probe_duration(input_path):
+    """Video-stream duration, not the container-level `format=duration` tag:
+    a stream-copy trim (or a corrupt secondary stream) can leave the
+    container tag reporting a duration far longer than the video actually
+    plays, which silently over-chunks past the real content."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", input_path],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
+    try:
+        return float(result.stdout)
+    except ValueError:
+        pass
+
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", input_path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
-    duration = float(result.stdout)
+    return float(result.stdout)
+
+
+def split_video_into_chunks(input_path, output_dir, chunk_length=5):
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"[INFO] Getting video duration for: {input_path}")
+    duration = _probe_duration(input_path)
     print(f"[INFO] Video duration: {duration:.2f} seconds")
 
     chunk_infos = []
@@ -49,9 +68,19 @@ def split_video_into_chunks(input_path, output_dir, chunk_length=5):
         for future in as_completed(futures):
             chunks.append(future.result())
 
-    chunks.sort(key=lambda p: float(os.path.splitext(os.path.basename(p))[0].split("chunk_")[1].split("-")[0]))
+    chunks.sort(key=lambda p: chunk_bounds(p)[0])
     print(f"[INFO] Total chunks created: {len(chunks)}")
     return chunks
+
+
+def chunk_bounds(chunk_path):
+    """Real (start, end) seconds encoded in a `chunk_{start}-{end}.mp4` name,
+    rounded to the nearest second -- the last chunk is usually shorter than
+    `chunk_length`, so this must be read back rather than assumed uniform."""
+    name = os.path.splitext(os.path.basename(chunk_path))[0]
+    start_str, end_str = name.split("chunk_")[1].split("-")
+    return round(float(start_str)), round(float(end_str))
+
 
 def infer_chunk(chunk_path):
     try:
