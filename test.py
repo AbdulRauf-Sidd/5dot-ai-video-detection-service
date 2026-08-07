@@ -55,7 +55,7 @@ def _run(label: str, fn, hard: bool = True):
 
 def check_config_imports():
     from config.project_config import (  # noqa: F401
-        SQS_QUEUE_URL, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, WEBHOOK_URL,
+        SQS_QUEUE_URL, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, WEBHOOK_URL, WEBHOOK_SECRET,
         SERVICE_NAME, IDLE_TIMEOUT_SECONDS, MODEL_CACHE_DIR, CHECKPOINT,
         RAFT_CHECKPOINT, XCLIP_LOCAL_DIR, DEVICE, THRESHOLD,
     )
