@@ -10,7 +10,12 @@ import time
 
 import requests
 
-from config.project_config import SERVICE_NAME, WEBHOOK_MAX_RETRIES, WEBHOOK_URL
+from config.project_config import (
+    SERVICE_NAME,
+    WEBHOOK_MAX_RETRIES,
+    WEBHOOK_SECRET,
+    WEBHOOK_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +29,11 @@ def notify(job_id: str, status: str, result: dict | None = None) -> None:
         "status": status,
         "result": result or {},
     }
+    headers = {"X-Webhook-Secret": WEBHOOK_SECRET} if WEBHOOK_SECRET else None
 
     for attempt in range(1, WEBHOOK_MAX_RETRIES + 1):
         try:
-            resp = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+            resp = requests.post(WEBHOOK_URL, json=payload, headers=headers, timeout=10)
             resp.raise_for_status()
             return
         except Exception as exc:
