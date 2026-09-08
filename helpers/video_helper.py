@@ -54,14 +54,15 @@ def split_video_into_chunks(input_path, output_dir, chunk_length=5):
     print(f"[INFO] Video duration: {duration:.2f} seconds")
 
     chunk_infos = []
-    for start in range(0, int(duration), chunk_length):
+    # Use max(1, int(duration)) so videos < 1s still get one chunk
+    for start in range(0, max(1, int(duration)), chunk_length):
         end = min(start + chunk_length, duration)
         chunk_path = os.path.join(output_dir, f"chunk_{start}-{end}.mp4")
         chunk_infos.append((input_path, start, end, chunk_path))
 
     chunks = []
 
-    max_workers = min(len(chunk_infos), os.cpu_count())
+    max_workers = max(1, min(len(chunk_infos), os.cpu_count() or 1))
     print(f"[INFO] Starting parallel chunk creation with {max_workers} workers")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(create_chunk, *info) for info in chunk_infos]
