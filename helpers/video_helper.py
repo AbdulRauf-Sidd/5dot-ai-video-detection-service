@@ -3,7 +3,7 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from ml_models import video
 from repositories.validation_tool import validate_video
-from config.project_config import DEVICE, THRESHOLD
+from config.project_config import DEVICE, RAFT_BATCH_SIZE, THRESHOLD
 
 def create_chunk(input_path, start, end, chunk_path):
     print(f"[INFO] Creating chunk: {chunk_path} (from {start}s to {end}s)")
@@ -86,7 +86,8 @@ def chunk_bounds(chunk_path):
 def infer_chunk(chunk_path):
     try:
         print(f"[INFO] Starting inference for chunk: {chunk_path}")
-        result = validate_video(chunk_path, video.raft_model, video.fused_model, DEVICE, THRESHOLD)
+        result = validate_video(chunk_path, video.raft_model, video.fused_model, DEVICE, THRESHOLD,
+                                raft_batch_size=RAFT_BATCH_SIZE)
         print(f"[INFO] Completed inference for chunk: {chunk_path}, probability: {result['probability']:.4f}")
         return {
             "chunk": os.path.basename(chunk_path),

@@ -96,26 +96,49 @@ def compute_flow_pair(model: RAFT, device: str, frame1: np.ndarray, frame2: np.n
     return flow_up[0].permute(1, 2, 0).cpu().numpy()
 
 
-def compute_all_flows(raft_model: RAFT, device: str, frames: List[np.ndarray]) -> np.ndarray:
+@torch.no_grad()
+def compute_flow_batch(model: RAFT, device: str, frames1: List[np.ndarray], frames2: List[np.ndarray]) -> np.ndarray:
+    """Batched compute_flow_pair: same ops, N pairs per RAFT call. Returns (N, H, W, 2) float32."""
+    im1 = torch.from_numpy(np.stack(frames1)).permute(0, 3, 1, 2).float().to(device)
+    im2 = torch.from_numpy(np.stack(frames2)).permute(0, 3, 1, 2).float().to(device)
+
+    padder = InputPadder(im1.shape)
+    im1, im2 = padder.pad(im1, im2)
+
+    _, flow_up = model(im1, im2, iters=12, test_mode=True)
+    flow_up = padder.unpad(flow_up)
+    return flow_up.permute(0, 2, 3, 1).cpu().numpy()
+
+
+def _postprocess_flow(flow: np.ndarray) -> np.ndarray:
+    # Resize to 224x224 for model input
+    flow_resized = np.stack([
+        cv2.resize(flow[..., 0], (224, 224), interpolation=cv2.INTER_LINEAR),
+        cv2.resize(flow[..., 1], (224, 224), interpolation=cv2.INTER_LINEAR),
+    ], axis=-1)
+    # Normalize: clip to ±20 and scale to [-1, 1]
+    flow_norm = np.clip(flow_resized, -20.0, 20.0) / 20.0
+    return flow_norm.astype(np.float32)
+
+
+def compute_all_flows(raft_model: RAFT, device: str, frames: List[np.ndarray], batch_size: int = 1) -> np.ndarray:
     """Compute optical flows for all frame pairs. Returns (T-1, 2, H, W)"""
     # Preprocess frames for RAFT (resize + crop to 448x448)
     proc = [crop_center(resize_min_side(f, 448), 448) for f in frames]
 
     def compute_single_flow(i):
-        flow = compute_flow_pair(raft_model, device, proc[i], proc[i + 1])
-        # Resize to 224x224 for model input
-        flow_resized = np.stack([
-            cv2.resize(flow[..., 0], (224, 224), interpolation=cv2.INTER_LINEAR),
-            cv2.resize(flow[..., 1], (224, 224), interpolation=cv2.INTER_LINEAR),
-        ], axis=-1)
-        # Normalize: clip to ±20 and scale to [-1, 1]
-        flow_norm = np.clip(flow_resized, -20.0, 20.0) / 20.0
-        return flow_norm.astype(np.float32)
+        return _postprocess_flow(compute_flow_pair(raft_model, device, proc[i], proc[i + 1]))
 
-    # GPU: sequential is faster — CUDA serializes ops and threads only add overhead.
+    # GPU: batch pairs so each RAFT call fills the GPU; batch_size=1 reproduces
+    # the original one-pair-per-call behaviour exactly.
     # CPU: thread pool helps since PyTorch releases the GIL during computation.
     if device == "cuda":
-        flows = [compute_single_flow(i) for i in range(len(proc) - 1)]
+        n_pairs = len(proc) - 1
+        flows = []
+        for s in range(0, n_pairs, max(1, batch_size)):
+            e = min(s + max(1, batch_size), n_pairs)
+            batch = compute_flow_batch(raft_model, device, proc[s:e], proc[s + 1:e + 1])
+            flows.extend(_postprocess_flow(f) for f in batch)
     else:
         max_workers = min(len(proc) - 1, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -143,7 +166,7 @@ def load_raft_model(ckpt_path: str, device: str) -> RAFT:
 # Main
 # ============================================================
 
-def validate_video(video_path, raft_model, fused_model, device, threshold):
+def validate_video(video_path, raft_model, fused_model, device, threshold, raft_batch_size=1):
     """Run deepfake detection on a single video"""
     
     print(f"[*] Video: {video_path}")
@@ -156,7 +179,7 @@ def validate_video(video_path, raft_model, fused_model, device, threshold):
     
     # Compute optical flows
     print(f"[*] Computing optical flows...")
-    flows = compute_all_flows(raft_model, device, frames_flow)
+    flows = compute_all_flows(raft_model, device, frames_flow, batch_size=raft_batch_size)
     print(f"[*] Flows shape: {flows.shape}")
     
     # Prepare video frames for DeMamba

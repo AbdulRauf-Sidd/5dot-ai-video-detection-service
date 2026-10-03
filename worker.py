@@ -20,6 +20,7 @@ import webhook
 from config.project_config import (
     AWS_REGION,
     DEVICE,
+    GPU_CHUNK_CONCURRENCY,
     IDLE_TIMEOUT_SECONDS,
     SERVICE_NAME,
     SQS_QUEUE_URL,
@@ -55,7 +56,12 @@ def extract_job_id(message: dict) -> str:
 
 def _run_chunk_inference(chunks: list[str]) -> list[dict]:
     if DEVICE == "cuda":
-        return [infer_chunk(c) for c in chunks]
+        if GPU_CHUNK_CONCURRENCY <= 1:
+            return [infer_chunk(c) for c in chunks]
+        # Threads share the single loaded model copy (forward passes are stateless);
+        # one thread's CPU decode/preprocess overlaps another's GPU work.
+        with ThreadPoolExecutor(max_workers=min(len(chunks), GPU_CHUNK_CONCURRENCY)) as ex:
+            return list(ex.map(infer_chunk, chunks))
     with ThreadPoolExecutor(max_workers=min(len(chunks), os.cpu_count() or 4)) as ex:
         return list(ex.map(infer_chunk, chunks))
 

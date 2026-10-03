@@ -21,6 +21,11 @@ try:
 except ImportError:
     DEVICE = "cpu"
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))
+# Frame pairs per RAFT call on GPU (1 = original one-pair-at-a-time behaviour).
+RAFT_BATCH_SIZE = int(os.getenv("RAFT_BATCH_SIZE", "8"))
+# Chunks processed concurrently on GPU, sharing one copy of the models
+# (1 = original sequential behaviour). Overlaps CPU decode with GPU compute.
+GPU_CHUNK_CONCURRENCY = int(os.getenv("GPU_CHUNK_CONCURRENCY", "2"))
 
 # --- SQS ---
 SQS_QUEUE_URL = os.environ["SQS_QUEUE_URL"]
