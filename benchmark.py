@@ -1,20 +1,30 @@
 """
-Compare the original inference path against batched/concurrent configurations
-on a real video from S3: wall-clock time, per-chunk probabilities, peak GPU memory.
+Compare the original inference path against faster configurations on a real
+video from S3: wall-clock time, probability changes, GPU/CPU utilization.
 
 Run inside the worker container on the GPU instance (needs the model weights
 under /model-cache/{SERVICE_NAME}/ and AWS credentials/instance role):
 
-    python benchmark.py <s3_url> [BATCH:CONCURRENCY ...]
+    python benchmark.py <s3_url> [CONFIG ...]
 
-    python benchmark.py s3://5dot-storage/uploads/video.mp4
-    python benchmark.py s3://5dot-storage/uploads/video.mp4 8:1 1:2 8:2 16:4
+    python benchmark.py s3://5dot-storage/uploads/video.mp4 8:1 1:2
+    python benchmark.py s3://5dot-storage/uploads/video.mp4 iters=6 stride=2 size=320 iters=8,stride=2
 
 <s3_url> may be s3://bucket/key, an https S3 object URL
 (bucket.s3.region.amazonaws.com/key or s3.region.amazonaws.com/bucket/key),
-or a bare key in AWS_BUCKET_NAME. With no configs, the RAFT_BATCH_SIZE /
-GPU_CHUNK_CONCURRENCY values from the environment are tested. The baseline is
-always 1:1, i.e. the exact pre-change behaviour.
+or a bare key in AWS_BUCKET_NAME.
+
+Each CONFIG is either BATCH:CONCURRENCY (throughput only) or comma-separated
+key=value pairs; unspecified keys keep their baseline value:
+    batch=N   frame pairs per RAFT call                      (baseline 1)
+    conc=N    chunks processed concurrently                  (baseline 1)
+    iters=N   RAFT refinement iterations          [changes results] (baseline 12)
+    stride=N  use every Nth frame pair (fewer pairs) [changes results] (baseline 1)
+    size=N    RAFT input resolution, multiple of 8 [changes results] (baseline 448)
+
+With no configs, the RAFT_BATCH_SIZE / GPU_CHUNK_CONCURRENCY values from the
+environment are tested. The baseline always runs first and is the exact
+original pipeline.
 """
 
 import os
@@ -185,10 +195,20 @@ def diagnose(u):
     return "neither saturated (waiting on sync/IO)"
 
 
-def run(chunks, raft, fused, batch_size, concurrency):
+BASELINE = {"batch": 1, "conc": 1, "iters": 12, "stride": 1, "size": 448}
+
+
+def label(cfg):
+    diff = [f"{k}={v}" for k, v in cfg.items() if v != BASELINE[k]]
+    return ",".join(diff) or "baseline"
+
+
+def run(chunks, raft, fused, cfg):
     def one(c):
         try:
-            return validate_video(c, raft, fused, DEVICE, THRESHOLD, raft_batch_size=batch_size)
+            return validate_video(c, raft, fused, DEVICE, THRESHOLD, raft_batch_size=cfg["batch"],
+                                  raft_iters=cfg["iters"], flow_pair_stride=cfg["stride"],
+                                  raft_size=cfg["size"])
         except Exception as e:  # e.g. CUDA OOM -- in the worker this would silently score 0.0
             return {"probability": float("nan"), "prediction": "ERROR", "error": str(e)}
 
@@ -198,10 +218,10 @@ def run(chunks, raft, fused, batch_size, concurrency):
         torch.cuda.synchronize()
     with UtilSampler() as sampler:
         t0 = time.perf_counter()
-        if concurrency <= 1:
+        if cfg["conc"] <= 1:
             results = [one(c) for c in chunks]
         else:
-            with ThreadPoolExecutor(max_workers=min(len(chunks), concurrency)) as ex:
+            with ThreadPoolExecutor(max_workers=min(len(chunks), cfg["conc"])) as ex:
                 results = list(ex.map(one, chunks))
         if DEVICE == "cuda":
             torch.cuda.synchronize()
@@ -212,12 +232,29 @@ def run(chunks, raft, fused, batch_size, concurrency):
 
 def parse_configs(args):
     if not args:
-        return [(RAFT_BATCH_SIZE, GPU_CHUNK_CONCURRENCY)]
+        return [{**BASELINE, "batch": RAFT_BATCH_SIZE, "conc": GPU_CHUNK_CONCURRENCY}]
     configs = []
     for a in args:
-        b, _, c = a.partition(":")
-        configs.append((int(b), int(c or 1)))
+        cfg = dict(BASELINE)
+        if "=" in a:
+            for kv in a.split(","):
+                k, _, v = kv.partition("=")
+                if k not in BASELINE:
+                    sys.exit(f"Unknown config key {k!r} in {a!r}; expected one of {list(BASELINE)}")
+                cfg[k] = int(v)
+        else:
+            b, _, c = a.partition(":")
+            cfg["batch"], cfg["conc"] = int(b), int(c or 1)
+        if cfg["size"] % 8:
+            sys.exit(f"size must be a multiple of 8, got {cfg['size']}")
+        configs.append(cfg)
     return configs
+
+
+def video_score(results):
+    # Same aggregation as worker.py: the max chunk probability drives the verdict
+    probs = [r["probability"] for r in results if r["prediction"] != "ERROR"]
+    return max(probs, default=float("nan"))
 
 
 def main():
@@ -227,7 +264,7 @@ def main():
     url = sys.argv[1]
     configs = parse_configs(sys.argv[2:])
     if DEVICE != "cuda":
-        print("[WARN] No CUDA device: batching/concurrency settings only affect the GPU path.")
+        print("[WARN] No CUDA device: batch/conc settings only affect the GPU path.")
 
     raft, fused, _ = load_models()
 
@@ -236,40 +273,64 @@ def main():
         chunks = split_video_into_chunks(source, os.path.join(work_dir, "chunks"), 5)
         print(f"[*] {len(chunks)} chunks")
 
-        # Warm-up so CUDA init / cuDNN autotuning doesn't skew the first timed run
-        for b, _ in [(1, 1)] + configs:
-            validate_video(chunks[0], raft, fused, DEVICE, THRESHOLD, raft_batch_size=b)
+        # Warm-up so CUDA init / cuDNN autotuning doesn't skew the timed runs
+        for cfg in [BASELINE] + configs:
+            run([chunks[0]], raft, fused, {**cfg, "conc": 1})
 
-        t_base, base, mem_base, u_base = run(chunks, raft, fused, 1, 1)
-        rows = [("1:1 (baseline)", t_base, mem_base, 0.0, 0, 0, u_base)]
-        for b, c in configs:
-            t, res, mem, u = run(chunks, raft, fused, b, c)
-            errors = sum(r["prediction"] == "ERROR" for r in res)
-            ok = [(x, y) for x, y in zip(base, res) if y["prediction"] != "ERROR"]
-            max_diff = max((abs(x["probability"] - y["probability"]) for x, y in ok), default=0.0)
-            flips = sum(x["prediction"] != y["prediction"] for x, y in ok)
-            rows.append((f"{b}:{c}", t, mem, max_diff, flips, errors, u))
-            for ch, x, y in zip(chunks, base, res):
-                if y["prediction"] == "ERROR":
-                    print(f"[ERROR] {b}:{c} {os.path.basename(ch)}: {y['error']}")
+        runs = [(BASELINE, *run(chunks, raft, fused, BASELINE))]
+        for cfg in configs:
+            runs.append((cfg, *run(chunks, raft, fused, cfg)))
+            for ch, r in zip(chunks, runs[-1][2]):
+                if r["prediction"] == "ERROR":
+                    print(f"[ERROR] {label(cfg)} {os.path.basename(ch)}: {r['error']}")
+
+    base = runs[0][2]
+    t_base = runs[0][1]
+    base_score = video_score(base)
+    names = [label(cfg) for cfg, *_ in runs]
+    w = max(16, max(len(n) for n in names) + 2)
 
     print()
-    print(f"{'batch:conc':<16}{'time (s)':>10}{'speedup':>9}{'peak MB':>9}"
-          f"{'max prob diff':>15}{'flips':>7}{'errors':>8}")
-    for name, t, mem, d, f, e, _ in rows:
-        print(f"{name:<16}{t:>10.2f}{t_base / t:>8.2f}x{mem:>9.0f}{d:>15.2e}{f:>7}{e:>8}")
+    print("Per-chunk probability (Δ vs baseline; * = verdict flipped)")
+    print(f"{'chunk':<20}" + "".join(f"{n:>{w}}" for n in names))
+    for i, ch in enumerate(chunks):
+        cells = []
+        for _, _, res, *_ in runs:
+            r = res[i]
+            if r["prediction"] == "ERROR":
+                cells.append("ERROR")
+                continue
+            d = r["probability"] - base[i]["probability"]
+            flip = "*" if r["prediction"] != base[i]["prediction"] else ""
+            cells.append(f"{r['probability']:.4f}" if r is base[i] else f"{r['probability']:.4f} ({d:+.4f}){flip}")
+        print(f"{os.path.basename(ch):<20}" + "".join(f"{c:>{w}}" for c in cells))
+
+    print()
+    print(f"{'config':<{w}}{'time (s)':>10}{'speedup':>9}{'peak MB':>9}{'max Δ':>9}{'mean Δ':>9}"
+          f"{'flips':>7}{'errors':>8}{'video score':>13}{'verdict':>9}")
+    for (cfg, t, res, mem, _), name in zip(runs, names):
+        ok = [(x, y) for x, y in zip(base, res) if y["prediction"] != "ERROR"]
+        diffs = [abs(x["probability"] - y["probability"]) for x, y in ok]
+        flips = sum(x["prediction"] != y["prediction"] for x, y in ok)
+        errors = len(res) - len(ok)
+        score = video_score(res)
+        verdict = "Fake" if score >= THRESHOLD else "Real"
+        if res is not base and verdict != ("Fake" if base_score >= THRESHOLD else "Real"):
+            verdict += "*"
+        print(f"{name:<{w}}{t:>10.2f}{t_base / t:>8.2f}x{mem:>9.0f}{max(diffs, default=0.0):>9.4f}"
+              f"{(sum(diffs) / len(diffs) if diffs else 0.0):>9.4f}{flips:>7}{errors:>8}{score:>13.4f}{verdict:>9}")
 
     print()
     print(f"Utilization (averages over each run; {available_cores():g} CPU cores available to this container)")
-    print(f"{'batch:conc':<16}{'GPU %':>7}{'GPU mem MB':>12}{'proc CPU %':>12}"
+    print(f"{'config':<{w}}{'GPU %':>7}{'GPU mem MB':>12}{'proc CPU %':>12}"
           f"{'busiest thr %':>15}{'host CPU %':>12}  bottleneck")
-    for name, *_, u in rows:
-        print(f"{name:<16}{u['gpu']:>7.0f}{u['gpu_mem']:>12.0f}{u['proc']:>12.0f}"
+    for (_, _, _, _, u), name in zip(runs, names):
+        print(f"{name:<{w}}{u['gpu']:>7.0f}{u['gpu_mem']:>12.0f}{u['proc']:>12.0f}"
               f"{u['thread_max']:>15.0f}{u['host']:>12.0f}  {diagnose(u)}")
     print()
+    print("video score = max chunk probability (same as worker.py); * = verdict differs from baseline.")
     print("GPU % / GPU mem: whole GPU via nvidia-smi (includes other containers on it).")
-    print("proc CPU %: this process, 100 = one full core. busiest thr %: its single busiest thread;")
-    print("~100 there with low GPU % means Python/GIL is the limit, so more threads won't help.")
+    print("proc CPU %: this process, 100 = one full core. busiest thr %: its single busiest thread.")
 
 
 if __name__ == "__main__":
