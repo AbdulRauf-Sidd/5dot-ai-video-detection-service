@@ -22,8 +22,8 @@ key=value pairs; unspecified keys keep their baseline value:
     stride=N  use every Nth frame pair (fewer pairs) [changes results] (baseline 1)
     size=N    RAFT input resolution, multiple of 8 [changes results] (baseline 448)
 
-With no configs, the RAFT_BATCH_SIZE / GPU_CHUNK_CONCURRENCY values from the
-environment are tested. The baseline always runs first and is the exact
+With no configs, the RAFT_BATCH_SIZE / FLOW_PAIR_STRIDE / GPU_CHUNK_CONCURRENCY
+values from the environment (the production defaults) are tested. The baseline always runs first and is the exact
 original pipeline.
 """
 
@@ -52,6 +52,7 @@ from config.project_config import (
     AWS_REGION,
     AWS_SECRET_ACCESS_KEY,
     DEVICE,
+    FLOW_PAIR_STRIDE,
     GPU_CHUNK_CONCURRENCY,
     RAFT_BATCH_SIZE,
     THRESHOLD,
@@ -232,7 +233,7 @@ def run(chunks, raft, fused, cfg):
 
 def parse_configs(args):
     if not args:
-        return [{**BASELINE, "batch": RAFT_BATCH_SIZE, "conc": GPU_CHUNK_CONCURRENCY}]
+        return [{**BASELINE, "batch": RAFT_BATCH_SIZE, "stride": FLOW_PAIR_STRIDE, "conc": GPU_CHUNK_CONCURRENCY}]
     configs = []
     for a in args:
         cfg = dict(BASELINE)
