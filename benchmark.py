@@ -253,9 +253,9 @@ def parse_configs(args):
 
 
 def video_score(results):
-    # Same aggregation as worker.py: the max chunk probability drives the verdict
+    # Same aggregation as worker.py: average the valid chunk probabilities.
     probs = [r["probability"] for r in results if r["prediction"] != "ERROR"]
-    return max(probs, default=float("nan"))
+    return sum(probs) / len(probs) if probs else float("nan")
 
 
 def main():
