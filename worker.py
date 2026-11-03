@@ -128,13 +128,8 @@ def process_job(conn, job_id: str, message_meta: dict | None = None) -> None:
             probability = r["result"].get("probability", 0.0)
             db.update_chunk(conn, job_id, i, probability, start, end)
 
-        # Peak (max), not average: this score is a risk score (high = bad),
-        # so one strongly-flagged chunk should drive the overall verdict
-        # instead of being diluted by a long clean stretch either side of it
-        # -- e.g. a real video with a short deepfaked splice would otherwise
-        # average out to "authentic". Matches core_service's own fallback
-        # convention in api/detection_webhooks.py's _derive_result_from_chunks.
-        overall_score = max(r["result"].get("probability", 0.0) for r in chunk_results)
+        probs = [r["result"].get("probability", 0.0) for r in chunk_results]
+        overall_score = sum(probs) / len(probs)
         db.save_result(conn, job_id, overall_score)
 
         webhook.notify(job_id, "complete", {"score": overall_score, "threshold": THRESHOLD})
