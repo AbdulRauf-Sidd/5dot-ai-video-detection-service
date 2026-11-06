@@ -134,10 +134,8 @@ def process_job(conn, job_id: str, message_meta: dict | None = None) -> None:
             probability = r["result"].get("probability", 0.0)
             db.update_chunk(conn, job_id, i, probability, start, end)
 
-        # The overall video score is the arithmetic mean of its chunk scores.
-        overall_score = sum(
-            r["result"].get("probability", 0.0) for r in chunk_results
-        ) / len(chunk_results)
+        probs = [r["result"].get("probability", 0.0) for r in chunk_results]
+        overall_score = sum(probs) / len(probs)
         db.save_result(conn, job_id, overall_score)
 
         webhook.notify(job_id, "complete", {"score": overall_score, "threshold": THRESHOLD})
